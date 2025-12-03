@@ -31,8 +31,7 @@ module.exports = {
       chainId: 11155111,
     },
     blockdagTestnet: {
-      url:
-        process.env.BLOCKDAG_RPC_URL || "https://testnet-rpc.blockdag.network",
+      url: process.env.BLOCKDAG_RPC_URL || "https://rpc.awakening.bdagscan.com",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
       chainId: 1043,
     },
