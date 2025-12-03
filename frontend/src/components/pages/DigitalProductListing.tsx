@@ -220,6 +220,7 @@ const DigitalProductListing: React.FC = () => {
       // Store original filename in description for reliable download
       const descriptionWithFilename = `${formData.description}\n\n[FILENAME:${uploadedFiles.mainFile.name}]`;
 
+      console.log("📤 Calling createProduct...");
       const result = await createProduct(
         formData.name,
         descriptionWithFilename,
@@ -229,18 +230,27 @@ const DigitalProductListing: React.FC = () => {
         thumb.uri
       );
 
-      if (result.success) {
+      console.log("📥 createProduct result:", result);
+
+      if (result && result.success) {
+        console.log("✅ Product created successfully, updating UI...");
         setTransactionStatus({
           status: "success",
-          message: "Product listed successfully!",
+          message: result.transactionHash
+            ? `Product listed successfully! Transaction: ${result.transactionHash.slice(
+                0,
+                10
+              )}...`
+            : "Product listed successfully!",
           txHash: result.transactionHash,
           productId: result.productId,
         });
         setFormData({ name: "", description: "", price: "" });
         setUploadedFiles({ mainFile: null, thumbnailFile: null });
       } else {
+        console.error("❌ createProduct failed:", result);
         // Check if it's a pause error and handle it with popup
-        if (handlePauseError(result.error || "")) {
+        if (result && handlePauseError(result.error || "")) {
           setTransactionStatus({
             status: "idle",
             message: "",
@@ -248,7 +258,7 @@ const DigitalProductListing: React.FC = () => {
         } else {
           setTransactionStatus({
             status: "error",
-            message: result.error || "Failed to create product",
+            message: result?.error || "Failed to create product",
           });
         }
       }

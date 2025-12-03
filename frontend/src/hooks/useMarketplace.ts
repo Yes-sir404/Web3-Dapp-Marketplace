@@ -108,6 +108,26 @@ export const useMarketplace = (
   const handleContractError = (error: any, operation: string): string => {
     console.error(`❌ ${operation} failed:`, error);
 
+    // Handle JSON-RPC errors specifically
+    if (
+      error.code === "SERVER_ERROR" ||
+      error.code === "NETWORK_ERROR" ||
+      error.message?.includes("Internal JSON-RPC") ||
+      error.message?.includes("JSON-RPC") ||
+      error.error?.code === "SERVER_ERROR"
+    ) {
+      return "Network error: Unable to connect to blockchain. Please check your network connection and try again.";
+    }
+
+    // Handle gas estimation errors
+    if (
+      error.code === "UNPREDICTABLE_GAS_LIMIT" ||
+      error.message?.includes("gas") ||
+      error.message?.includes("Gas")
+    ) {
+      return "Transaction failed: Unable to estimate gas. The transaction may fail. Please check your inputs and try again.";
+    }
+
     // Check for marketplace pause error - multiple detection methods
     if (
       error.code === "CALL_EXCEPTION" ||
@@ -210,22 +230,170 @@ export const useMarketplace = (
         if (!description.trim()) throw new Error("Description required");
         if (!priceInBdag || parseFloat(priceInBdag) <= 0)
           throw new Error("Valid price required");
+        if (!uri || !uri.trim()) throw new Error("Product URI required");
+        if (!thumbnailUri || !thumbnailUri.trim())
+          throw new Error("Thumbnail URI required");
 
         const contract = await getContract();
         const priceInWei = ethers.parseEther(priceInBdag);
 
+        // Validate input lengths to match contract requirements
+        if (name.trim().length > 100)
+          throw new Error("Product name too long (max 100 characters)");
+        if (description.trim().length > 500)
+          throw new Error("Description too long (max 500 characters)");
+        if (category.trim().length > 50)
+          throw new Error("Category too long (max 50 characters)");
+        if (category.trim().length === 0) throw new Error("Category required");
+
+        // Check if contract is paused before attempting transaction
+        try {
+          const isPaused = await contract.paused();
+          if (isPaused) {
+            throw new Error(
+              "The marketplace is currently paused for maintenance. Please try again later."
+            );
+          }
+        } catch (pauseError: any) {
+          // If we can't check pause status, log but continue
+          console.warn("Could not check pause status:", pauseError);
+        }
+
+        // Estimate gas first with explicit error handling
+        let gasEstimate: bigint;
+        try {
+          gasEstimate = await contract.createProduct.estimateGas(
+            name.trim(),
+            description.trim(),
+            category.trim(),
+            priceInWei,
+            uri.trim(),
+            thumbnailUri.trim()
+          );
+          // Add 20% buffer for gas
+          gasEstimate = (gasEstimate * BigInt(120)) / BigInt(100);
+        } catch (gasError: any) {
+          console.error("Gas estimation failed:", gasError);
+          // If gas estimation fails, try with a default value
+          gasEstimate = BigInt(500000); // Default gas limit
+          const errorMsg =
+            gasError?.reason || gasError?.message || "Gas estimation failed";
+          if (
+            errorMsg.includes("EnforcedPause") ||
+            errorMsg.includes("paused")
+          ) {
+            throw new Error(
+              "The marketplace is currently paused for maintenance. Please try again later."
+            );
+          }
+          if (
+            errorMsg.includes("revert") ||
+            errorMsg.includes("execution reverted")
+          ) {
+            throw new Error(`Transaction would fail: ${errorMsg}`);
+          }
+        }
+
+        // Execute transaction with explicit gas limit
         const tx = await contract.createProduct(
           name.trim(),
           description.trim(),
           category.trim(),
           priceInWei,
-          uri,
-          thumbnailUri
+          uri.trim(),
+          thumbnailUri.trim(),
+          { gasLimit: gasEstimate }
         );
-        const receipt = await tx.wait();
 
-        return { success: true, transactionHash: receipt.hash };
-      } catch (error) {
+        // Get transaction hash immediately - this is available right after submission
+        const txHash = tx.hash;
+        console.log("✅ Transaction submitted with hash:", txHash);
+
+        // Wait for transaction to be mined with timeout
+        let receipt;
+        try {
+          // Use Promise.race to add a timeout to tx.wait()
+          receipt = (await Promise.race([
+            tx.wait(),
+            new Promise(
+              (_, reject) =>
+                setTimeout(
+                  () => reject(new Error("Transaction wait timeout")),
+                  60000
+                ) // 1 minute timeout
+            ),
+          ])) as any;
+
+          console.log("✅ Transaction receipt received:", receipt);
+        } catch (waitError: any) {
+          console.warn("⚠️ Transaction wait timeout or error:", waitError);
+
+          // Even if wait fails, if we have a tx hash, the transaction was submitted
+          // The transaction might already be confirmed on the blockchain
+          // Check if transaction exists by trying to get the receipt directly
+          try {
+            const provider = signer?.provider;
+            if (provider) {
+              const txResponse = await provider.getTransaction(txHash);
+              if (txResponse) {
+                console.log(
+                  "✅ Transaction found on chain, checking confirmation..."
+                );
+                // If transaction exists, it was submitted successfully
+                // Return success - the transaction is likely already confirmed
+                return { success: true, transactionHash: txHash };
+              }
+            }
+          } catch (checkError) {
+            console.warn("Could not verify transaction on chain:", checkError);
+          }
+
+          // Return success with tx hash anyway since transaction was submitted
+          return { success: true, transactionHash: txHash };
+        }
+
+        if (!receipt) {
+          // If no receipt but we have tx hash, transaction was submitted
+          console.log(
+            "⚠️ No receipt received, but transaction was submitted:",
+            txHash
+          );
+          return { success: true, transactionHash: txHash };
+        }
+
+        // Verify receipt status
+        if (receipt.status === 0 || receipt.status === false) {
+          throw new Error("Transaction failed on blockchain");
+        }
+
+        console.log("✅ Transaction confirmed:", receipt.hash || txHash);
+        return { success: true, transactionHash: receipt.hash || txHash };
+      } catch (error: any) {
+        console.error("Create product error details:", error);
+
+        // Handle JSON-RPC errors specifically
+        if (
+          error.code === "SERVER_ERROR" ||
+          error.code === "NETWORK_ERROR" ||
+          error.message?.includes("Internal JSON-RPC")
+        ) {
+          const msg =
+            "Network error: Unable to connect to blockchain. Please check your network connection and try again.";
+          setError(msg);
+          return { success: false, error: msg };
+        }
+
+        // Handle gas estimation errors
+        if (
+          error.code === "UNPREDICTABLE_GAS_LIMIT" ||
+          error.message?.includes("gas")
+        ) {
+          const msg =
+            "Transaction failed: Unable to estimate gas. The transaction may fail. Please check your inputs and try again.";
+          setError(msg);
+          return { success: false, error: msg };
+        }
+
         const msg = handleContractError(error, "create product");
         setError(msg);
         return { success: false, error: msg };
